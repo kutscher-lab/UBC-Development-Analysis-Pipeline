@@ -1,0 +1,217 @@
+---
+title: "01_QC_processing_E16_Lmx1a_cre_Tdtom_Tbr2_WT_scRNAseq" #change this based on the sample
+output: html_document
+date: "2025-10-06"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Generate output folders 
+```{r}
+setwd("/path/to/dir")
+```
+
+## Load packages
+```{r load packages, include=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(SeuratObject)
+library(usethis)
+library(devtools)
+library(Seurat)
+library(copykat)
+library(tibble)
+library(ggplot2)
+library(Matrix)
+library(RColorBrewer)
+```
+
+## E16_wt input
+# Load the dataset
+#Create Seurat object
+```{r}
+h5_file_path <- "/path/to/cell/ranger/output/E16_Lmx1a-cre_TdTom_Tbr2_wt/outs/raw_feature_bc_matrix.h5"
+e16_tbr2_wt.data <- Read10X_h5(filename = h5_file_path)
+dim(e16_tbr2_wt.data); class(e16_tbr2_wt.data)
+e16_tbr2_wt.data[1:4, 1:6]
+
+id = "E16_Lmx1a-cre_TdTom_Tbr2_wt"
+e16_tbr2_wt <- CreateSeuratObject(counts = e16_tbr2_wt.data, project = "e16_tbr2_wt", assay = "RNA", min.cells = 3, min.features = 200)
+e16_tbr2_wt$sample = id
+e16_tbr2_wt
+```
+
+## Quality control dataset
+```{r}
+mito.genes <- grep("^mt-", rownames(e16_tbr2_wt, value = TRUE) 
+e16_tbr2_wt$percent.mito <- (Matrix::colSums(e16_tbr2_wt.data[mito.genes,])*100)/Matrix::colSums(e16_tbr2_wt.data) 
+e16_tbr2_wt$staticNr <- 1
+dim(e16_tbr2_wt@meta.data)
+colnames(e16_tbr2_wt@meta.data)
+```
+
+# Filter samples based on set parameters
+```{r}
+qc_df_e16_wt <- data.frame(barcode = Cells(e16_tbr2_wt),
+                    sample = e16_tbr2_wt$sample,
+                    genes_exp = e16_tbr2_wt$nFeature_RNA,
+                    total_counts = e16_tbr2_wt$nCount_RNA,
+                    mito_fraction = e16_tbr2_wt$percent.mito)
+
+# Quality check: number of UMIs (nCount_RNA)
+count_thresh.min = 750 #arrange the tresholds based on your data
+count_thresh.max = quantile(qc_df_e16_wt$total_counts, 0.975)[[1]]
+summary(e16_tbr2_wt$nCount_RNA)
+p1 <- ggplot(qc_df_e16_wt, aes(x = total_counts, fill = sample)) + 
+  geom_density(aes(alpha = 0.3)) +
+  geom_vline(xintercept = count_thresh.min, color = "red") +
+  labs(x = "Counts per cell") +
+  xlim(0, 100000) +
+  theme_classic()
+sum(qc_df_e16_wt$total_counts < count_thresh.min)
+
+
+# Quality check: number of genes expressed (nFeature_RNA)
+feature_thresh.min = 500 #arrange the tresholds based on your data
+feature_thresh.max = quantile(qc_df_e16_wt$genes_exp, 0.975)[[1]]
+summary(qc_df_e16_wt$genes_exp)
+p2 <- ggplot(qc_df_e16_wt, aes(x = genes_exp, fill = sample)) + 
+  geom_density(aes(alpha = 0.3)) +
+  geom_vline(xintercept = feature_thresh.min, color = "red") +
+  labs(x = "Number of genes expressed") +
+  theme_classic()
+sum(qc_df_e16_wt$genes_exp < feature_thresh.min)
+
+# Quality check: percent mitochondrial genes expressed (percent.mito)
+mito.genes_thresh = 5 #arrange the tresholds based on your data
+p3 <- ggplot(qc_df_e16_wt, aes(x = mito_fraction, fill = sample)) +
+  geom_density(aes(alpha = 0.2)) +
+  labs(x = "Mitchondrial fraction") +
+  geom_vline(xintercept = mito.genes_thresh, color = "red") +
+  xlim(0, 20) +
+  theme_classic()
+sum(qc_df_e16_wt$mito_fraction >= mito.genes_thresh)
+
+
+qc_df_e16_wt <- qc_df_e16_wt %>% 
+  mutate(filtered = ifelse((#feature_thresh.max > genes_exp &
+                              genes_exp >= feature_thresh.min & 
+                              #count_thresh.max > total_counts &
+                              total_counts >= count_thresh.min & 
+                              mito_fraction <= mito.genes_thresh), "Passed", "Failed"))
+
+p4 <- ggplot(qc_df_e16_wt, aes (x = total_counts,
+                   y = genes_exp, 
+                   color = filtered)) +
+  geom_point(alpha = 0.5) +
+  geom_vline(xintercept = count_thresh.min, color = "red") +
+  geom_hline(yintercept = feature_thresh.min, color = "red") +
+  labs(x = "Counts per cell",
+       y = "Number of genes expressed",
+       color = paste0("Mitochondrial\nFraction: ", mito.genes_thresh, "%")) + 
+  xlim(0, 30000) +
+  ylim(0, 10000) +
+  theme_classic()
+
+cells.filtered = qc_df_e16_wt$barcode[qc_df_e16_wt$filtered == "Passed"]
+
+library(cowplot)
+plot_grid(p1)
+plot_grid(p2)
+plot_grid(p3)
+plot_grid(p4)
+
+plot_grid(p1, p2, p3, p4, nrow = 2)
+#ggsave("E16_Lmx1a_cre_Tdtom_Tbr2_wt_VA.jpg", path = fig_folder, width = 6, height = 4)
+```
+
+```{r}
+set_qc_theme <- function() {
+  theme_classic(base_family = "sans", base_size = 8) +
+    theme(
+      legend.position = "none",
+      axis.title = element_text(size = 8, family = "sans"),
+      axis.text = element_text(size = 8, family = "sans"),
+      strip.text = element_text(size = 8, family = "sans")
+    )
+}
+
+# Apply to all plots
+p1 <- p1 + set_qc_theme()
+p2 <- p2 + set_qc_theme()
+p3 <- p3 + set_qc_theme()
+p4 <- p4 + set_qc_theme()
+
+# Combine plots in one row
+final_plot <- plot_grid(p1, p2, p3, p4, nrow = 1, rel_widths = c(1, 1, 1, 1))
+
+```
+
+
+```{r}
+#New Seurat Object for filtered version
+e16_wt_seurat_object.filtered = subset(e16_tbr2_wt, cells = cells.filtered)
+e16_wt_seurat_object.filtered = NormalizeData(e16_wt_seurat_object.filtered)
+e16_wt_seurat_object.filtered = FindVariableFeatures(e16_wt_seurat_object.filtered, nfeatures = 5000)
+e16_wt_seurat_object.filtered = ScaleData(e16_wt_seurat_object.filtered, verbose = F)
+e16_wt_seurat_object.filtered = RunPCA(e16_wt_seurat_object.filtered, features = VariableFeatures(e16_wt_seurat_object.filtered))
+ElbowPlot(object = e16_wt_seurat_object.filtered, ndims = 50)
+# use 20 PCs
+
+dims.use = 20
+e16_wt_seurat_object.filtered = RunUMAP(e16_wt_seurat_object.filtered, dims = 1:dims.use, verbose = F)
+DimPlot(e16_wt_seurat_object.filtered, reduction = "umap", group.by = "sample")
+
+qc_theme <- function() {
+  theme_classic(base_family = "sans", base_size = 8) +
+    theme(
+      axis.title = element_text(size = 8, family = "sans"),
+      axis.text = element_text(size = 8, family = "sans"),
+      legend.text = element_text(size = 8, family = "sans"),
+      legend.title = element_text(size = 8, family = "sans"),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+}
+
+# - QC Features and feature --------------------------------------------#
+
+custom_featureplot <- function(object, feature) {
+  FeaturePlot(
+    object = object,
+    reduction = "umap",
+    features = feature,
+    pt.size = 0.3      # same transparency for all
+  ) +
+    qc_theme() +
+    theme(legend.key.size = unit(0.4, "cm"),
+          legend.title = element_text(size = 7),
+          legend.text = element_text(size = 7),
+          plot.margin = margin(0, 0, 0, 0))
+}
+
+#choose your markers
+fp1 <- custom_featureplot(e16_wt_seurat_object.filtered, "nCount_RNA")
+fp2 <- custom_featureplot(e16_wt_seurat_object.filtered, "nFeature_RNA")
+fp3 <- custom_featureplot(e16_wt_seurat_object.filtered, "percent.mito")
+fp4 <- custom_featureplot(e16_wt_seurat_object.filtered, "Lmx1a")
+fp5 <- custom_featureplot(e16_wt_seurat_object.filtered, "Eomes")
+fp6 <- custom_featureplot(e16_wt_seurat_object.filtered, "Tlx3")
+fp7 <- custom_featureplot(e16_wt_seurat_object.filtered, "Barhl1")
+fp8 <- custom_featureplot(e16_wt_seurat_object.filtered, "Pax6")
+fp9 <- custom_featureplot(e16_wt_seurat_object.filtered, "En2")
+fp10 <- custom_featureplot(e16_wt_seurat_object.filtered, "En1")
+fp11 <- custom_featureplot(e16_wt_seurat_object.filtered, "Otx2")
+fp12 <- custom_featureplot(e16_wt_seurat_object.filtered, "Sox2")
+fp13 <- custom_featureplot(e16_wt_seurat_object.filtered, "Mki67")
+fp14 <- custom_featureplot(e16_wt_seurat_object.filtered, "Crx")
+
+e16_wt_final_umap <- plot_grid(fp1, fp2, fp3, fp4, fp5, fp6, fp7, fp8, fp9, fp10, fp11, fp12, fp13,fp14, nrow = 4)
+
+#Save Seurat Object
+assign("E16_Lmx1a_cre_Tbr2_WT", e16_wt_seurat_object.filtered)
+saveRDS(`E16_Lmx1a_cre_Tbr2_WT`, "/path/to/dir/E16_Lmx1a_cre_Tbr2_WT.filtered.RDS")
+```
+
+
+
