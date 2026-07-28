@@ -1,0 +1,275 @@
+---
+title: "02_doublet_finder_E16_scRNAseq"
+output: html_document
+date: "2026-07-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+## Generate output folders 
+setwd("/path/to/out/dir")
+```
+
+## Load packages
+```{r load packages, include=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(Seurat)
+library(copykat)
+library(tibble)
+library(harmony)
+library(cowplot)
+library(DoubletFinder)
+library(viridis)
+```
+
+## Read in RDS file
+```{r}
+seurat_object = readRDS("/path/to/filtered/seurat/object")
+```
+
+## Determine doublets
+```{r}
+#install.packages("remotes")  # if not already installed
+remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+
+# List all your objects in one list (if you have multiples)
+seurat_list <- list(
+  seurat_object
+)
+
+# Names for the list elements so they get saved back with the same variable names
+object_names <- c(
+  "seurat_object.E16_genotype"
+)
+
+# Run DoubletFinder on each object with 5% expected doublets
+for (i in seq_along(seurat_list)) {
+  obj <- seurat_list[[i]]
+  obj <- doubletFinder(
+    obj,
+    pN = 0.25,
+    pK = 0.09,
+    nExp = round(ncol(obj) * 0.05),  # for 5% expected doublets
+    PCs = 1:10
+  )
+  assign(object_names[i], obj)  #Save back into original variable name
+}
+
+# Rename the doubletFinder and pANN columns
+rename_doublet_columns <- function(obj) {
+  # Find the DF.classifications column
+  df_col <- grep("^DF\\.classifications_", colnames(obj@meta.data), value = TRUE)
+  if (length(df_col) == 1) {
+    obj$DoubletFinder <- obj[[df_col]][,1]
+    obj@meta.data[[df_col]] <- NULL
+  }
+  # Find the pANN column
+  pann_col <- grep("^pANN_", colnames(obj@meta.data), value = TRUE)
+  if (length(pann_col) == 1) {
+    obj$pANN <- obj[[pann_col]][,1]
+    obj@meta.data[[pann_col]] <- NULL
+  }
+  
+  return(obj)
+}
+
+# Apply to all your objects
+
+seurat_object.E16_genotype <- rename_doublet_columns(seurat_object.E16_genotype)
+
+
+#Check if it worked
+df2_E16_genotype <- seurat_object.E16_genotype@meta.data
+
+
+table(df2_E16_genotype$DoubletFinder)
+#Doublet Singlet (example)
+#226    4300 
+
+
+#Save the doublet data for each sample
+saveRDS(seurat_object.E16_genotype,"/path/to/out/dir")
+
+
+#Visualizing doublets and singlets
+seurat_object.doublets <- readRDS("/path/to/doublet/labeledseurat/obj")
+
+seurat_object.doublets$DoubletFinder <- factor(
+     seurat_object.doublets$DoubletFinder,
+     levels = c("Singlet", "Doublet")
+)
+
+umap <- DimPlot(seurat_object.doublets, group.by = "DoubletFinder", cols = c("gray80", "red"))
+```
+
+
+## inspect seurat object
+```{r}
+#quick check on the object
+table(seurat_object.doublets$sample)
+
+
+```
+
+## Process seurat object
+```{r}
+
+seurat_object.doublets = NormalizeData(seurat_object.doublets)
+
+# --- Identify unwanted housekeeping genes ---
+ribo.genes <- grep("^Rps|^Rpl", rownames(seurat_object.doublets), value = TRUE)
+mt.genes   <- grep("^mt-", rownames(seurat_object.doublets), value = TRUE, ignore.case = TRUE)
+hb.genes   <- grep("^Hb[ab]", rownames(seurat_object.doublets), value = TRUE)
+
+unwanted.genes <- unique(c(ribo.genes, mt.genes, hb.genes))
+
+# --- Variable feature selection without unwanted genes ---
+seurat_object_filtered <- FindVariableFeatures(seurat_object.doublets, nfeatures = 5000)
+
+var.features <- setdiff(VariableFeatures(seurat_object_filtered), unwanted.genes)
+VariableFeatures(seurat_object_filtered) <- var.features
+
+
+seurat_object_filtered = ScaleData(seurat_object_filtered, verbose = F)
+seurat_object_filtered = RunPCA(seurat_object_filtered, features = VariableFeatures(seurat_object_filtered))
+
+# Elbow plot to determine required PCs
+elbow <- ElbowPlot(object = seurat_object_filtered, ndims = 50) +
+  theme(
+    text = element_text(family = "sans", size = 8),
+    axis.text = element_text(family = "sans", size = 8),
+    axis.title = element_text(family = "sans", size = 8),
+    legend.text = element_text(family = "sans", size = 8),
+    legend.title = element_text(family = "sans", size = 8))
+
+
+# Generate UMAP and TSNE on 20 PCs (see elbowplot)
+dims.use = 20
+seurat_object_filtered = RunUMAP(seurat_object_filtered, dims = 1:dims.use, verbose = F)
+seurat_object_filtered = RunTSNE(seurat_object_filtered, dims = 1:dims.use, verbose = F, check_duplicates= FALSE)
+
+#Checking if correctly merged
+#You should see each sample with cell numbers
+seurat_object_filtered$sample <- NA  # create a clean column
+ 
+seurat_object_filtered$sample[grep("^genotype", colnames(seurat_object_filtered))] <- "genotype naming"
+
+
+#Visualize by sample
+UMAP <- DimPlot(seurat_object_filtered, reduction = "umap", group.by = "sample")
+TSNE <- DimPlot(seurat_object_filtered, reduction = "tsne", group.by = "sample")
+```
+
+
+
+## Remove doublets
+```{r}
+seurat_object_filtered = subset(seurat_object_filtered, DoubletFinder == "Singlet")
+
+# Plot UMAPs
+UMAP <- DimPlot(
+  seurat_object_filtered,
+  reduction = "umap",
+  cols = c("#ef476f"),
+  group.by = "sample"
+) +
+  coord_equal() +
+  theme(
+    text = element_text(family = "Arial", size = 8),
+    axis.text = element_text(family = "Arial", size = 8),
+    axis.title = element_text(family = "Arial", size = 8),
+    legend.position = "right"  
+  )
+
+Idents(seurat_object_filtered) <- seurat_object_filtered$sample
+
+
+# Count cells per sample
+cell_counts_E16_singlets <- seurat_object_filtered@meta.data %>%
+  group_by(sample) %>%
+  summarise(total_cells = n()) %>%
+  mutate(color = "#ef476f")  # pick any color you like
+
+
+# Plot tSNE 
+TSNE_E16_singlets <- DimPlot(
+  seurat_object_filtered,
+  reduction = "tsne",
+  cols = c("#ef476f"),
+  group.by = "sample"
+) +
+  coord_equal() +
+  theme(
+    text = element_text(family = "Arial", size = 8),
+    axis.text = element_text(family = "Arial", size = 8),
+    axis.title = element_text(family = "Arial", size = 8),
+    legend.position = "right" 
+  )
+
+
+saveRDS(
+  seurat_object_filtered,
+  file = "/path/to/obj/seurat_object_singlets.RDS"
+)
+
+```
+
+
+## Statistics on filtered seurat object
+```{r}
+seurat_object_filtered = readRDS(file = "/path/to/obj/seurat_object_singlets.RDS")
+meta = seurat_object_filtered@meta.data
+stats = lapply(split(meta, meta$sample), function(df) df %>% summary())
+```
+
+## Qualtiy control on singlets filtered object
+```{r}
+
+qc_theme <- function() {
+  theme_classic(base_family = "Arial", base_size = 8) +
+    theme(
+      axis.title = element_text(size = 8, family = "Arial"),
+      axis.text = element_text(size = 8, family = "Arial"),
+      legend.text = element_text(size = 8, family = "Arial"),
+      legend.title = element_text(size = 8, family = "Arial"),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+}
+
+fp <- function(object, feature) {
+  FeaturePlot(
+    seurat_object_filtered,
+    reduction = "umap",
+    features = feature,
+    pt.size = 0.3,      # same transparency for all
+    order = TRUE    
+  ) +
+    qc_theme() +
+    theme(legend.key.size = unit(0.4, "cm"),
+          legend.title = element_text(size = 7),
+          legend.text = element_text(size = 7),
+          plot.margin = margin(0, 0, 0, 0))
+}
+
+fp1 <- fp(seurat_object_filtered, "nCount_RNA")
+fp2 <- fp(seurat_object_filtered, "nFeature_RNA")
+fp3 <- fp(seurat_object_filtered, "percent.mito")
+
+final_umap_E16_singlets_merged <- plot_grid(fp1, fp2, fp3, nrow = 1)
+
+
+# Check genes of interest
+fp1 <- fp(seurat_object_filtered, "Eomes")
+fp2 <- fp(seurat_object_filtered, "Lmx1a") 
+
+```
+
+
+
+
